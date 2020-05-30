@@ -27,6 +27,7 @@ type Server struct {
 	IPHeaders  []string
 	LookupAddr func(net.IP) (string, error)
 	LookupPort func(net.IP, uint64) error
+	cache      *Cache
 	gr         geo.Reader
 }
 
@@ -34,14 +35,19 @@ type Response struct {
 	IP         net.IP               `json:"ip"`
 	IPDecimal  *big.Int             `json:"ip_decimal"`
 	Country    string               `json:"country,omitempty"`
-	CountryEU  *bool                `json:"country_eu,omitempty"`
 	CountryISO string               `json:"country_iso,omitempty"`
+	CountryEU  *bool                `json:"country_eu,omitempty"`
+	RegionName string               `json:"region_name,omitempty"`
+	RegionCode string               `json:"region_code,omitempty"`
+	MetroCode  uint                 `json:"metro_code,omitempty"`
+	PostalCode string               `json:"zip_code,omitempty"`
 	City       string               `json:"city,omitempty"`
-	Hostname   string               `json:"hostname,omitempty"`
 	Latitude   float64              `json:"latitude,omitempty"`
 	Longitude  float64              `json:"longitude,omitempty"`
+	Timezone   string               `json:"time_zone,omitempty"`
 	ASN        string               `json:"asn,omitempty"`
 	ASNOrg     string               `json:"asn_org,omitempty"`
+	Hostname   string               `json:"hostname,omitempty"`
 	UserAgent  *useragent.UserAgent `json:"user_agent,omitempty"`
 }
 
@@ -51,8 +57,8 @@ type PortResponse struct {
 	Reachable bool   `json:"reachable"`
 }
 
-func New(db geo.Reader) *Server {
-	return &Server{gr: db}
+func New(db geo.Reader, cache *Cache) *Server {
+	return &Server{cache: cache, gr: db}
 }
 
 func ipFromForwardedForHeader(v string) string {
@@ -93,6 +99,10 @@ func (s *Server) newResponse(r *http.Request) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
+	response, ok := s.cache.Get(ip)
+	if ok {
+		return *response, nil
+	}
 	ipDecimal := iputil.ToDecimal(ip)
 	country, _ := s.gr.Country(ip)
 	city, _ := s.gr.City(ip)
@@ -111,20 +121,27 @@ func (s *Server) newResponse(r *http.Request) (Response, error) {
 		parsed := useragent.Parse(userAgentRaw)
 		userAgent = &parsed
 	}
-	return Response{
+	response = &Response{
 		IP:         ip,
 		IPDecimal:  ipDecimal,
 		Country:    country.Name,
 		CountryISO: country.ISO,
 		CountryEU:  country.IsEU,
+		RegionName: city.RegionName,
+		RegionCode: city.RegionCode,
+		MetroCode:  city.MetroCode,
+		PostalCode: city.PostalCode,
 		City:       city.Name,
-		Hostname:   hostname,
 		Latitude:   city.Latitude,
 		Longitude:  city.Longitude,
+		Timezone:   city.Timezone,
 		ASN:        autonomousSystemNumber,
 		ASNOrg:     asn.AutonomousSystemOrganization,
+		Hostname:   hostname,
 		UserAgent:  userAgent,
-	}, nil
+	}
+	s.cache.Set(ip, response)
+	return *response, nil
 }
 
 func (s *Server) newPortResponse(r *http.Request) (PortResponse, error) {
