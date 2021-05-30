@@ -1,6 +1,6 @@
 # echoip
 
-![Build Status](https://github.com/mpolden/echoip/workflows/ci/badge.svg) #
+![Build Status](https://github.com/mpolden/echoip/workflows/ci/badge.svg)
 
 A simple service for looking up your IP address. This is the code that powers
 https://ifconfig.co.
