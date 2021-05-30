@@ -1,6 +1,6 @@
 # echoip
 
-[![Build Status](https://travis-ci.org/mpolden/echoip.svg)](https://travis-ci.org/mpolden/echoip)
+![Build Status](https://github.com/mpolden/echoip/workflows/ci/badge.svg)
 
 A simple service for looking up your IP address. This is the code that powers
 https://ifconfig.co.
@@ -77,10 +77,11 @@ between IPv4 and IPv6 lookup.
 * Fast
 * Supports IPv6
 * Supports HTTPS
-* Supports common command-line clients (e.g. `curl`, `httpie`, `wget` and `fetch`)
+* Supports common command-line clients (e.g. `curl`, `httpie`, `ht`, `wget` and `fetch`)
 * JSON output
 * ASN, country and city lookup using the MaxMind GeoIP database
 * Port testing
+* All endpoints (except `/port`) can return information about a custom IP address specified via `?ip=` query parameter
 * Open source under the [BSD 3-Clause license](https://opensource.org/licenses/BSD-3-Clause)
 
 ## Why?
@@ -116,20 +117,21 @@ Click the button below to automatically build and deploy the application to Hero
 
 ```
 $ echoip -h
-Usage:
-  echoip [OPTIONS]
-
-Application Options:
-  -f, --country-db=FILE        Path to GeoIP country database
-  -c, --city-db=FILE           Path to GeoIP city database
-  -a, --asn-db=FILE            Path to GeoIP ASN database
-  -l, --listen=ADDR            Listening address (default: :8080)
-  -r, --reverse-lookup         Perform reverse hostname lookups
-  -p, --port-lookup            Enable port lookup
-  -t, --template=FILE          Path to template (default: index.html)
-  -H, --trusted-header=NAME    Header to trust for remote IP, if present (e.g. X-Real-IP)
-  -C, --cache-size=SIZE        Size of response cache. Set to 0 to disable
-
-Help Options:
-  -h, --help                   Show this help message
+Usage of echoip:
+  -C int
+    	Size of response cache. Set to 0 to disable
+  -H value
+    	Header to trust for remote IP, if present (e.g. X-Real-IP)
+  -a string
+    	Path to GeoIP ASN database
+  -c string
+    	Path to GeoIP city database
+  -f string
+    	Path to GeoIP country database
+  -l string
+    	Listening address (default ":8080")
+  -p	Enable port lookup
+  -r	Perform reverse hostname lookups
+  -t string
+    	Path to template directory (default "html")
 ```

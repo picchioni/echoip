@@ -4,8 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/ioutil"
+	"log"
 	"path/filepath"
 	"strings"
+
+	"net/http/pprof"
 
 	"github.com/mpolden/echoip/iputil"
 	"github.com/mpolden/echoip/iputil/geo"
@@ -29,6 +33,8 @@ type Server struct {
 	LookupPort func(net.IP, uint64) error
 	cache      *Cache
 	gr         geo.Reader
+	profile    bool
+	Sponsor    bool
 }
 
 type Response struct {
@@ -57,8 +63,8 @@ type PortResponse struct {
 	Reachable bool   `json:"reachable"`
 }
 
-func New(db geo.Reader, cache *Cache) *Server {
-	return &Server{cache: cache, gr: db}
+func New(db geo.Reader, cache *Cache, profile bool) *Server {
+	return &Server{cache: cache, gr: db, profile: profile}
 }
 
 func ipFromForwardedForHeader(v string) string {
@@ -69,15 +75,27 @@ func ipFromForwardedForHeader(v string) string {
 	return v[:sep]
 }
 
-func ipFromRequest(headers []string, r *http.Request) (net.IP, error) {
+// ipFromRequest detects the IP address for this transaction.
+//
+// * `headers` - the specific HTTP headers to trust
+// * `r` - the incoming HTTP request
+// * `customIP` - whether to allow the IP to be pulled from query parameters
+func ipFromRequest(headers []string, r *http.Request, customIP bool) (net.IP, error) {
 	remoteIP := ""
-	for _, header := range headers {
-		remoteIP = r.Header.Get(header)
-		if http.CanonicalHeaderKey(header) == "X-Forwarded-For" {
-			remoteIP = ipFromForwardedForHeader(remoteIP)
+	if customIP && r.URL != nil {
+		if v, ok := r.URL.Query()["ip"]; ok {
+			remoteIP = v[0]
 		}
-		if remoteIP != "" {
-			break
+	}
+	if remoteIP == "" {
+		for _, header := range headers {
+			remoteIP = r.Header.Get(header)
+			if http.CanonicalHeaderKey(header) == "X-Forwarded-For" {
+				remoteIP = ipFromForwardedForHeader(remoteIP)
+			}
+			if remoteIP != "" {
+				break
+			}
 		}
 	}
 	if remoteIP == "" {
@@ -105,15 +123,15 @@ func userAgentFromRequest(r *http.Request) *useragent.UserAgent {
 }
 
 func (s *Server) newResponse(r *http.Request) (Response, error) {
-	ip, err := ipFromRequest(s.IPHeaders, r)
+	ip, err := ipFromRequest(s.IPHeaders, r, true)
 	if err != nil {
 		return Response{}, err
 	}
 	response, ok := s.cache.Get(ip)
 	if ok {
-		// Not Caching the userAgent as it can vary for a given IP
+		// Do not cache user agent
 		response.UserAgent = userAgentFromRequest(r)
-		return *response, nil
+		return response, nil
 	}
 	ipDecimal := iputil.ToDecimal(ip)
 	country, _ := s.gr.Country(ip)
@@ -127,8 +145,7 @@ func (s *Server) newResponse(r *http.Request) (Response, error) {
 	if asn.AutonomousSystemNumber > 0 {
 		autonomousSystemNumber = fmt.Sprintf("AS%d", asn.AutonomousSystemNumber)
 	}
-	userAgent := userAgentFromRequest(r)
-	response = &Response{
+	response = Response{
 		IP:         ip,
 		IPDecimal:  ipDecimal,
 		Country:    country.Name,
@@ -145,10 +162,10 @@ func (s *Server) newResponse(r *http.Request) (Response, error) {
 		ASN:        autonomousSystemNumber,
 		ASNOrg:     asn.AutonomousSystemOrganization,
 		Hostname:   hostname,
-		UserAgent:  userAgent,
 	}
 	s.cache.Set(ip, response)
-	return *response, nil
+	response.UserAgent = userAgentFromRequest(r)
+	return response, nil
 }
 
 func (s *Server) newPortResponse(r *http.Request) (PortResponse, error) {
@@ -157,7 +174,7 @@ func (s *Server) newPortResponse(r *http.Request) (PortResponse, error) {
 	if err != nil || port < 1 || port > 65535 {
 		return PortResponse{Port: port}, fmt.Errorf("invalid port: %s", lastElement)
 	}
-	ip, err := ipFromRequest(s.IPHeaders, r)
+	ip, err := ipFromRequest(s.IPHeaders, r, false)
 	if err != nil {
 		return PortResponse{Port: port}, err
 	}
@@ -170,9 +187,9 @@ func (s *Server) newPortResponse(r *http.Request) (PortResponse, error) {
 }
 
 func (s *Server) CLIHandler(w http.ResponseWriter, r *http.Request) *appError {
-	ip, err := ipFromRequest(s.IPHeaders, r)
+	ip, err := ipFromRequest(s.IPHeaders, r, true)
 	if err != nil {
-		return internalServerError(err)
+		return badRequest(err).WithMessage(err.Error()).AsJSON()
 	}
 	fmt.Fprintln(w, ip.String())
 	return nil
@@ -181,7 +198,7 @@ func (s *Server) CLIHandler(w http.ResponseWriter, r *http.Request) *appError {
 func (s *Server) CLICountryHandler(w http.ResponseWriter, r *http.Request) *appError {
 	response, err := s.newResponse(r)
 	if err != nil {
-		return internalServerError(err)
+		return badRequest(err).WithMessage(err.Error()).AsJSON()
 	}
 	fmt.Fprintln(w, response.Country)
 	return nil
@@ -190,7 +207,7 @@ func (s *Server) CLICountryHandler(w http.ResponseWriter, r *http.Request) *appE
 func (s *Server) CLICountryISOHandler(w http.ResponseWriter, r *http.Request) *appError {
 	response, err := s.newResponse(r)
 	if err != nil {
-		return internalServerError(err)
+		return badRequest(err).WithMessage(err.Error()).AsJSON()
 	}
 	fmt.Fprintln(w, response.CountryISO)
 	return nil
@@ -199,7 +216,7 @@ func (s *Server) CLICountryISOHandler(w http.ResponseWriter, r *http.Request) *a
 func (s *Server) CLICityHandler(w http.ResponseWriter, r *http.Request) *appError {
 	response, err := s.newResponse(r)
 	if err != nil {
-		return internalServerError(err)
+		return badRequest(err).WithMessage(err.Error()).AsJSON()
 	}
 	fmt.Fprintln(w, response.City)
 	return nil
@@ -208,7 +225,7 @@ func (s *Server) CLICityHandler(w http.ResponseWriter, r *http.Request) *appErro
 func (s *Server) CLICoordinatesHandler(w http.ResponseWriter, r *http.Request) *appError {
 	response, err := s.newResponse(r)
 	if err != nil {
-		return internalServerError(err)
+		return badRequest(err).WithMessage(err.Error()).AsJSON()
 	}
 	fmt.Fprintf(w, "%s,%s\n", formatCoordinate(response.Latitude), formatCoordinate(response.Longitude))
 	return nil
@@ -217,7 +234,7 @@ func (s *Server) CLICoordinatesHandler(w http.ResponseWriter, r *http.Request) *
 func (s *Server) CLIASNHandler(w http.ResponseWriter, r *http.Request) *appError {
 	response, err := s.newResponse(r)
 	if err != nil {
-		return internalServerError(err)
+		return badRequest(err).WithMessage(err.Error()).AsJSON()
 	}
 	fmt.Fprintf(w, "%s\n", response.ASN)
 	return nil
@@ -226,9 +243,9 @@ func (s *Server) CLIASNHandler(w http.ResponseWriter, r *http.Request) *appError
 func (s *Server) JSONHandler(w http.ResponseWriter, r *http.Request) *appError {
 	response, err := s.newResponse(r)
 	if err != nil {
-		return internalServerError(err).AsJSON()
+		return badRequest(err).WithMessage(err.Error()).AsJSON()
 	}
-	b, err := json.Marshal(response)
+	b, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		return internalServerError(err).AsJSON()
 	}
@@ -248,7 +265,51 @@ func (s *Server) PortHandler(w http.ResponseWriter, r *http.Request) *appError {
 	if err != nil {
 		return badRequest(err).WithMessage(err.Error()).AsJSON()
 	}
-	b, err := json.Marshal(response)
+	b, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return internalServerError(err).AsJSON()
+	}
+	w.Header().Set("Content-Type", jsonMediaType)
+	w.Write(b)
+	return nil
+}
+
+func (s *Server) cacheResizeHandler(w http.ResponseWriter, r *http.Request) *appError {
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		return badRequest(err).WithMessage(err.Error()).AsJSON()
+	}
+	capacity, err := strconv.Atoi(string(body))
+	if err != nil {
+		return badRequest(err).WithMessage(err.Error()).AsJSON()
+	}
+	if err := s.cache.Resize(capacity); err != nil {
+		return badRequest(err).WithMessage(err.Error()).AsJSON()
+	}
+	data := struct {
+		Message string `json:"message"`
+	}{fmt.Sprintf("Changed cache capacity to %d.", capacity)}
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return internalServerError(err).AsJSON()
+	}
+	w.Header().Set("Content-Type", jsonMediaType)
+	w.Write(b)
+	return nil
+}
+
+func (s *Server) cacheHandler(w http.ResponseWriter, r *http.Request) *appError {
+	cacheStats := s.cache.Stats()
+	var data = struct {
+		Size      int    `json:"size"`
+		Capacity  int    `json:"capacity"`
+		Evictions uint64 `json:"evictions"`
+	}{
+		cacheStats.Size,
+		cacheStats.Capacity,
+		cacheStats.Evictions,
+	}
+	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return internalServerError(err).AsJSON()
 	}
@@ -260,9 +321,9 @@ func (s *Server) PortHandler(w http.ResponseWriter, r *http.Request) *appError {
 func (s *Server) DefaultHandler(w http.ResponseWriter, r *http.Request) *appError {
 	response, err := s.newResponse(r)
 	if err != nil {
-		return internalServerError(err)
+		return badRequest(err).WithMessage(err.Error())
 	}
-	t, err := template.ParseFiles(s.Template)
+	t, err := template.ParseGlob(s.Template + "/*")
 	if err != nil {
 		return internalServerError(err)
 	}
@@ -270,6 +331,7 @@ func (s *Server) DefaultHandler(w http.ResponseWriter, r *http.Request) *appErro
 	if err != nil {
 		return internalServerError(err)
 	}
+
 	var data = struct {
 		Response
 		Host         string
@@ -279,6 +341,7 @@ func (s *Server) DefaultHandler(w http.ResponseWriter, r *http.Request) *appErro
 		BoxLonRight  float64
 		JSON         string
 		Port         bool
+		Sponsor      bool
 	}{
 		response,
 		r.Host,
@@ -288,6 +351,7 @@ func (s *Server) DefaultHandler(w http.ResponseWriter, r *http.Request) *appErro
 		response.Longitude + 0.05,
 		string(json),
 		s.LookupPort != nil,
+		s.Sponsor,
 	}
 	if err := t.Execute(w, &data); err != nil {
 		return internalServerError(err)
@@ -306,7 +370,7 @@ func NotFoundHandler(w http.ResponseWriter, r *http.Request) *appError {
 func cliMatcher(r *http.Request) bool {
 	ua := useragent.Parse(r.UserAgent())
 	switch ua.Product {
-	case "curl", "HTTPie", "Wget", "fetch libfetch", "Go", "Go-http-client", "ddclient", "Mikrotik":
+	case "curl", "HTTPie", "httpie-go", "Wget", "fetch libfetch", "Go", "Go-http-client", "ddclient", "Mikrotik":
 		return true
 	}
 	return false
@@ -314,14 +378,25 @@ func cliMatcher(r *http.Request) bool {
 
 type appHandler func(http.ResponseWriter, *http.Request) *appError
 
+func wrapHandlerFunc(f http.HandlerFunc) appHandler {
+	return func(w http.ResponseWriter, r *http.Request) *appError {
+		f.ServeHTTP(w, r)
+		return nil
+	}
+}
+
 func (fn appHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if e := fn(w, r); e != nil { // e is *appError
+		if e.Code/100 == 5 {
+			log.Println(e.Error)
+		}
 		// When Content-Type for error is JSON, we need to marshal the response into JSON
 		if e.IsJSON() {
 			var data = struct {
+				Code  int    `json:"status"`
 				Error string `json:"error"`
-			}{e.Message}
-			b, err := json.Marshal(data)
+			}{e.Code, e.Message}
+			b, err := json.MarshalIndent(data, "", "  ")
 			if err != nil {
 				panic(err)
 			}
@@ -366,6 +441,17 @@ func (s *Server) Handler() http.Handler {
 	// Port testing
 	if s.LookupPort != nil {
 		r.RoutePrefix("GET", "/port/", s.PortHandler)
+	}
+
+	// Profiling
+	if s.profile {
+		r.Route("POST", "/debug/cache/resize", s.cacheResizeHandler)
+		r.Route("GET", "/debug/cache/", s.cacheHandler)
+		r.Route("GET", "/debug/pprof/cmdline", wrapHandlerFunc(pprof.Cmdline))
+		r.Route("GET", "/debug/pprof/profile", wrapHandlerFunc(pprof.Profile))
+		r.Route("GET", "/debug/pprof/symbol", wrapHandlerFunc(pprof.Symbol))
+		r.Route("GET", "/debug/pprof/trace", wrapHandlerFunc(pprof.Trace))
+		r.RoutePrefix("GET", "/debug/pprof/", wrapHandlerFunc(pprof.Index))
 	}
 
 	return r.Handler()
